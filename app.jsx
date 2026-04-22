@@ -1,6 +1,41 @@
 const { useState, useEffect, useMemo, useRef } = React;
 const { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid } = Recharts;
 
+// ============== FIREBASE ==============
+const firebaseConfig = {
+  apiKey: "AIzaSyCG2zUK66HOdf9FgbQvQUFEMvXJ8tP2Pm8",
+  authDomain: "rolgrad-budget.firebaseapp.com",
+  projectId: "rolgrad-budget",
+  storageBucket: "rolgrad-budget.firebasestorage.app",
+  messagingSenderId: "761530108423",
+  appId: "1:761530108423:web:dcdce853a5a768e3b2b8a2",
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+db.enablePersistence({ synchronizeTabs: true }).catch(() => {});
+
+const HOUSEHOLD_KEY = 'household_code_v1';
+const loadHousehold = () => localStorage.getItem(HOUSEHOLD_KEY);
+const saveHousehold = (code) => localStorage.setItem(HOUSEHOLD_KEY, code);
+const clearHousehold = () => localStorage.removeItem(HOUSEHOLD_KEY);
+
+// Генератор семейного кода: 12 символов без похожих (I, O, 0, 1), разбитых на 3 блока по 4
+const genHouseholdCode = () => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const arr = new Uint8Array(12);
+  crypto.getRandomValues(arr);
+  let s = '';
+  for (let i = 0; i < 12; i++) s += alphabet[arr[i] % alphabet.length];
+  return s.slice(0, 4) + '-' + s.slice(4, 8) + '-' + s.slice(8, 12);
+};
+
+const normalizeCode = (raw) => (raw || '').toUpperCase().replace(/[^A-Z2-9]/g, '').slice(0, 12);
+const formatCode = (raw) => {
+  const n = normalizeCode(raw);
+  return [n.slice(0, 4), n.slice(4, 8), n.slice(8, 12)].filter(Boolean).join('-');
+};
+const isValidCode = (raw) => normalizeCode(raw).length === 12;
+
 // ============== ИСХОДНЫЕ ДАННЫЕ ==============
 const DEFAULT_STATE = {
   version: 2,
@@ -212,17 +247,68 @@ const Icon = ({ name, size = 20, color = 'currentColor' }) => {
 };
 
 // ============== ОСНОВНОЙ КОМПОНЕНТ ==============
-function App() {
+function App({ householdCode, onLeaveHousehold }) {
   const [state, setState] = useState(loadState());
   const [tab, setTab] = useState('home');
   const [expanded, setExpanded] = useState({});
   const [modal, setModal] = useState(null); // {type, data}
   const [toast, setToast] = useState(null);
+  const [syncStatus, setSyncStatus] = useState('connecting'); // connecting | synced | offline | error
+  const lastRemoteJsonRef = useRef(null); // JSON того, что последний раз пришло из Firestore — чтобы не гонять эхо
 
-  // Автосохранение
+  // Автосохранение локально (fallback если нет сети)
   useEffect(() => {
     saveState(state);
   }, [state]);
+
+  // Подписка на Firestore: получаем state от других устройств в реальном времени
+  useEffect(() => {
+    if (!householdCode) return;
+    const docRef = db.collection('households').doc(householdCode);
+    const unsub = docRef.onSnapshot(
+      (snap) => {
+        if (!snap.exists) {
+          // Документ ещё не создан — создаём с текущим локальным state
+          const json = JSON.stringify(state);
+          lastRemoteJsonRef.current = json;
+          docRef.set({ state, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(() => {});
+          setSyncStatus('synced');
+          return;
+        }
+        const data = snap.data();
+        if (!data || !data.state) return;
+        const incomingJson = JSON.stringify(data.state);
+        if (incomingJson === lastRemoteJsonRef.current) {
+          setSyncStatus('synced');
+          return;
+        }
+        lastRemoteJsonRef.current = incomingJson;
+        setState({ ...DEFAULT_STATE, ...data.state });
+        setSyncStatus('synced');
+      },
+      (err) => {
+        console.warn('Firestore subscribe error', err);
+        setSyncStatus('error');
+      }
+    );
+    return unsub;
+  }, [householdCode]);
+
+  // Debounced запись локальных изменений в Firestore
+  useEffect(() => {
+    if (!householdCode) return;
+    const json = JSON.stringify(state);
+    if (json === lastRemoteJsonRef.current) return; // пришло оттуда же — не пушим обратно
+    setSyncStatus('connecting');
+    const t = setTimeout(() => {
+      lastRemoteJsonRef.current = json;
+      db.collection('households').doc(householdCode)
+        .set({ state, updatedAt: firebase.firestore.FieldValue.serverTimestamp() })
+        .then(() => setSyncStatus('synced'))
+        .catch((err) => { console.warn('Firestore write error', err); setSyncStatus('offline'); });
+    }, 500);
+    return () => clearTimeout(t);
+  }, [state, householdCode]);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
@@ -422,14 +508,23 @@ function App() {
       {/* Sticky header */}
       <div className="sticky top-0 z-20 backdrop-blur-lg bg-amber-50/90 border-b border-stone-200 px-4 py-3 safe-top">
         <div className="max-w-2xl mx-auto flex items-center justify-between">
-          <div>
-            <div className="text-[10px] tracking-[0.25em] text-stone-500 mono">БЮДЖЕТ · МАЙ 2026</div>
-            <div className="text-lg font-bold leading-tight">
-              {tab === 'home' && 'Главная'}
-              {tab === 'plan' && 'План расходов'}
-              {tab === 'pots' && 'Копилки и долги'}
-              {tab === 'sync' && 'Синхронизация'}
-              {tab === 'settings' && 'Настройки'}
+          <div className="flex items-center gap-2">
+            <div>
+              <div className="text-[10px] tracking-[0.25em] text-stone-500 mono flex items-center gap-1.5">
+                <span className={`inline-block w-1.5 h-1.5 rounded-full ${
+                  syncStatus === 'synced' ? 'bg-emerald-500' :
+                  syncStatus === 'connecting' ? 'bg-amber-500 animate-pulse' :
+                  syncStatus === 'offline' ? 'bg-stone-400' : 'bg-rose-500'
+                }`} title={{synced:'синхронизировано', connecting:'синхронизация…', offline:'офлайн', error:'ошибка связи'}[syncStatus]}></span>
+                БЮДЖЕТ · МАЙ 2026
+              </div>
+              <div className="text-lg font-bold leading-tight">
+                {tab === 'home' && 'Главная'}
+                {tab === 'plan' && 'План расходов'}
+                {tab === 'pots' && 'Копилки и долги'}
+                {tab === 'sync' && 'Синхронизация'}
+                {tab === 'settings' && 'Настройки'}
+              </div>
             </div>
           </div>
           <div className="text-right">
@@ -494,6 +589,9 @@ function App() {
             setState={setState}
             resetAll={resetAll}
             showToast={showToast}
+            householdCode={householdCode}
+            onLeaveHousehold={onLeaveHousehold}
+            syncStatus={syncStatus}
           />
         )}
       </main>
@@ -1000,18 +1098,71 @@ function SyncTab({ handleCSVImport, exportJSON, importJSON, state }) {
 }
 
 // ============== SETTINGS TAB ==============
-function SettingsTab({ state, setState, resetAll, showToast }) {
+function SettingsTab({ state, setState, resetAll, showToast, householdCode, onLeaveHousehold, syncStatus }) {
   const [startCash, setStartCash] = useState(state.startCash);
   const [income, setIncome] = useState(state.plannedIncome);
   const [month, setMonth] = useState(state.month);
+  const [codeShown, setCodeShown] = useState(false);
 
   const save = () => {
     setState(s => ({ ...s, startCash: +startCash, plannedIncome: +income, month }));
     showToast('Сохранено');
   };
 
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(householdCode);
+      showToast('Код скопирован');
+    } catch { showToast('Не получилось скопировать, выдели вручную', 'error'); }
+  };
+
+  const leave = () => {
+    if (confirm('Отключиться от семейного бюджета?\n\nПосле этого можно ввести другой код. Данные в облаке останутся, жена/ты с других устройств продолжат видеть.')) {
+      onLeaveHousehold();
+    }
+  };
+
   return (
     <div className="space-y-4">
+      {/* Семейный код */}
+      <div className="paper rounded-2xl p-5 border border-stone-200">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-xs tracking-widest mono text-stone-500">СЕМЕЙНЫЙ КОД</div>
+          <span className={`text-[10px] mono px-2 py-0.5 rounded-full ${
+            syncStatus === 'synced' ? 'bg-emerald-100 text-emerald-800' :
+            syncStatus === 'connecting' ? 'bg-amber-100 text-amber-800' :
+            'bg-stone-100 text-stone-600'
+          }`}>
+            {syncStatus === 'synced' ? 'синхронизировано' :
+             syncStatus === 'connecting' ? 'синхронизация…' :
+             syncStatus === 'offline' ? 'офлайн' : 'ошибка связи'}
+          </span>
+        </div>
+        <div className="p-4 rounded-xl bg-stone-900 text-amber-50 text-center">
+          <div className="mono text-2xl tracking-[0.2em] font-bold numeric select-all">
+            {codeShown ? householdCode : '••••-••••-••••'}
+          </div>
+          <div className="text-[11px] opacity-60 mt-1">
+            {codeShown ? 'этот код даёт доступ к бюджету' : 'нажми, чтобы показать'}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2 mt-3">
+          <button onClick={() => setCodeShown(s => !s)} className="tap py-2.5 rounded-xl bg-stone-200 text-stone-800 text-sm font-medium">
+            {codeShown ? 'Скрыть' : 'Показать'}
+          </button>
+          <button onClick={copyCode} className="tap py-2.5 rounded-xl bg-emerald-700 text-white text-sm font-medium">
+            Скопировать
+          </button>
+        </div>
+        <p className="text-xs text-stone-500 mt-3 leading-relaxed">
+          Чтобы жена/муж увидели тот же бюджет — скинь этот код в мессенджере. На новом устройстве:
+          открыть приложение → «У меня уже есть код» → ввести.
+        </p>
+        <button onClick={leave} className="tap w-full mt-3 py-2.5 rounded-xl bg-rose-50 text-rose-700 text-sm font-medium border border-rose-200">
+          Отключиться от этого бюджета
+        </button>
+      </div>
+
       <div className="paper rounded-2xl p-5 border border-stone-200">
         <div className="text-xs tracking-widest mono text-stone-500 mb-3">ОСНОВНЫЕ ПАРАМЕТРЫ</div>
         <div className="space-y-3">
@@ -1387,6 +1538,156 @@ function MathRow({ label, val, neg, pos, bold }) {
   );
 }
 
+// ============== ONBOARDING ==============
+function Onboarding({ onReady }) {
+  const [screen, setScreen] = useState('welcome'); // welcome | create | join
+  const [createdCode, setCreatedCode] = useState(null);
+  const [inputCode, setInputCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const doCreate = () => {
+    const code = genHouseholdCode();
+    setCreatedCode(code);
+    saveHousehold(code);
+    setScreen('created');
+  };
+  const finishCreate = () => onReady(createdCode);
+
+  const doJoin = async () => {
+    setError('');
+    if (!isValidCode(inputCode)) {
+      setError('Код должен быть 12 символов (как ABCD-EFGH-JKLM)');
+      return;
+    }
+    setBusy(true);
+    const code = formatCode(inputCode);
+    try {
+      const snap = await db.collection('households').doc(code).get();
+      if (!snap.exists) {
+        setError('Такого бюджета нет. Проверь код или создай новый.');
+        setBusy(false);
+        return;
+      }
+      saveHousehold(code);
+      onReady(code);
+    } catch (e) {
+      setError('Ошибка: ' + (e.message || e.code || 'нет связи'));
+      setBusy(false);
+    }
+  };
+
+  const copyCreated = async () => {
+    try { await navigator.clipboard.writeText(createdCode); } catch {}
+  };
+
+  return (
+    <div className="min-h-screen paper flex items-center justify-center p-5">
+      <div className="max-w-md w-full">
+        <div className="text-center mb-8">
+          <div className="inline-block w-16 h-16 rounded-2xl bg-stone-900 text-amber-50 flex items-center justify-center text-4xl font-black">V</div>
+          <div className="text-[10px] tracking-[0.3em] text-stone-500 mono mt-4">СЕМЕЙНЫЙ БЮДЖЕТ</div>
+          <h1 className="text-3xl font-black mt-1">Добро пожаловать</h1>
+        </div>
+
+        {screen === 'welcome' && (
+          <div className="space-y-3 slideup">
+            <button
+              onClick={doCreate}
+              className="tap w-full p-5 rounded-2xl bg-stone-900 text-amber-50 text-left"
+            >
+              <div className="text-xs tracking-widest mono opacity-60 mb-1">СОЗДАТЬ НОВЫЙ</div>
+              <div className="text-lg font-bold">У меня ещё нет бюджета</div>
+              <div className="text-xs opacity-70 mt-1">Создам, потом смогу поделиться кодом с женой / мужем</div>
+            </button>
+            <button
+              onClick={() => setScreen('join')}
+              className="tap w-full p-5 rounded-2xl border-2 border-stone-300 text-left"
+            >
+              <div className="text-xs tracking-widest mono text-stone-500 mb-1">ПРИСОЕДИНИТЬСЯ</div>
+              <div className="text-lg font-bold text-stone-900">У меня уже есть код</div>
+              <div className="text-xs text-stone-500 mt-1">Введу код от супруга / супруги</div>
+            </button>
+          </div>
+        )}
+
+        {screen === 'created' && (
+          <div className="space-y-3 slideup">
+            <div className="p-5 rounded-2xl paper border border-stone-200">
+              <div className="text-xs tracking-widest mono text-stone-500 mb-2">КОД ТВОЕГО БЮДЖЕТА</div>
+              <div className="p-4 rounded-xl bg-stone-900 text-amber-50 text-center mono text-2xl tracking-[0.2em] font-bold select-all">
+                {createdCode}
+              </div>
+              <button onClick={copyCreated} className="tap w-full mt-3 py-2.5 rounded-xl bg-emerald-700 text-white text-sm font-medium">
+                Скопировать
+              </button>
+              <p className="text-xs text-stone-500 mt-3 leading-relaxed">
+                Сохрани этот код. Чтобы второй член семьи увидел тот же бюджет — скинь ему код в мессенджере,
+                он введёт его при первом запуске приложения. Код всегда доступен в настройках.
+              </p>
+            </div>
+            <button onClick={finishCreate} className="tap w-full py-4 rounded-2xl bg-stone-900 text-amber-50 font-bold">
+              Продолжить →
+            </button>
+          </div>
+        )}
+
+        {screen === 'join' && (
+          <div className="space-y-3 slideup">
+            <div className="p-5 rounded-2xl paper border border-stone-200">
+              <label className="block">
+                <div className="text-xs tracking-widest mono text-stone-500 mb-2">КОД БЮДЖЕТА</div>
+                <input
+                  autoFocus
+                  value={inputCode}
+                  onChange={e => { setInputCode(formatCode(e.target.value)); setError(''); }}
+                  placeholder="ABCD-EFGH-JKLM"
+                  className="w-full p-4 rounded-xl border-2 border-stone-300 bg-white mono text-xl text-center tracking-[0.15em] font-bold uppercase"
+                  autoCapitalize="characters"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+              </label>
+              {error && <div className="text-sm text-rose-700 mt-2">{error}</div>}
+              <div className="grid grid-cols-2 gap-2 mt-3">
+                <button onClick={() => { setScreen('welcome'); setError(''); }} className="tap py-3 rounded-xl bg-stone-200 text-stone-800 font-medium">
+                  Назад
+                </button>
+                <button
+                  onClick={doJoin}
+                  disabled={busy || !isValidCode(inputCode)}
+                  className="tap py-3 rounded-xl bg-stone-900 text-amber-50 font-bold disabled:opacity-40"
+                >
+                  {busy ? 'Проверка…' : 'Войти'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="text-center text-[11px] text-stone-400 mono mt-6">
+          Real-time синхронизация между устройствами
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============== ROOT ==============
+function Root() {
+  const [householdCode, setHouseholdCode] = useState(loadHousehold());
+
+  const leave = () => {
+    clearHousehold();
+    setHouseholdCode(null);
+  };
+
+  if (!householdCode) {
+    return <Onboarding onReady={(code) => setHouseholdCode(code)} />;
+  }
+  return <App householdCode={householdCode} onLeaveHousehold={leave} />;
+}
+
 // ============== MOUNT ==============
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
+root.render(<Root />);

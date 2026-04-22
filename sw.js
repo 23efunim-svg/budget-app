@@ -1,5 +1,5 @@
 // Service Worker — обеспечивает работу приложения офлайн
-const CACHE_NAME = 'family-budget-v3';
+const CACHE_NAME = 'family-budget-v4';
 const URLS = [
   './',
   './index.html',
