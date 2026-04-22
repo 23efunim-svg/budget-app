@@ -14,6 +14,7 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
   <style>
@@ -51,6 +52,22 @@
 <body class="bg-amber-50">
   <div id="root"></div>
   <div id="boot-status">Загрузка приложения…<br/><span style="opacity:.6">первый запуск требует интернета для CDN</span></div>
+
+  <script>
+    // Проверяем зависимости ДО запуска babel-кода, чтобы дать понятную ошибку
+    (function checkDeps() {
+      const missing = [];
+      if (typeof React === 'undefined') missing.push('React');
+      if (typeof ReactDOM === 'undefined') missing.push('ReactDOM');
+      if (typeof PropTypes === 'undefined') missing.push('PropTypes');
+      if (typeof Recharts === 'undefined') missing.push('Recharts');
+      if (missing.length) {
+        const s = document.getElementById('boot-status');
+        s.innerHTML = '<div style="max-width:340px"><b style="color:#b91c1c">Не загрузились библиотеки</b><br/><br/><code style="font-size:11px;color:#44403c">' + missing.join(', ') + '</code><br/><br/><span style="opacity:.7">Проверьте интернет. Если недавно обновлялось — очистите данные сайта в настройках браузера и перезагрузите.</span></div>';
+        throw new Error('Missing: ' + missing.join(', '));
+      }
+    })();
+  </script>
 
   <script type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo, useRef } = React;
@@ -1455,8 +1472,8 @@ requestAnimationFrame(() => {
   <script>
     window.addEventListener('error', (e) => {
       const s = document.getElementById('boot-status');
-      if (s) {
-        s.innerHTML = '<div style="max-width:340px"><b style="color:#b91c1c">Ошибка при запуске</b><br/><br/><code style="font-size:11px;color:#44403c;word-break:break-all">' + (e.message || e.error || 'неизвестная') + '</code></div>';
+      if (s && !s.classList.contains('gone')) {
+        s.innerHTML = '<div style="max-width:340px"><b style="color:#b91c1c">Ошибка при запуске</b><br/><br/><code style="font-size:11px;color:#44403c;word-break:break-all">' + (e.message || e.error || 'неизвестная') + '</code><br/><br/><span style="opacity:.7">Попробуй обновить страницу (Ctrl+F5), если не помогло — напиши Клоду полный текст ошибки.</span></div>';
         s.classList.remove('gone');
       }
     });
